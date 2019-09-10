@@ -1,0 +1,154 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  creationTimestamp: null
+  name: ${NAME}-sa
+  namespace: ${NAMESPACE}
+
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${NAME}-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: ${NAME}-sa
+  namespace: ${NAMESPACE}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ${NAME}-extension-apiserver-authentication-reader-binding
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+- kind: ServiceAccount
+  name: ${NAME}-sa
+  namespace: ${NAMESPACE}
+  
+---
+apiVersion: v1
+data:
+  config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1alpha1
+    kind: KubeSchedulerConfiguration
+    schedulerName: ${SCHEDULERNAME}
+    algorithmSource:
+      policy:
+        configMap:
+          namespace: ${NAMESPACE}
+          name: ${NAME}-policy
+    leaderElection:
+      leaderElect: true
+      lockObjectName: ${NAME}
+      lockObjectNamespace: ${NAMESPACE}
+kind: ConfigMap
+metadata:
+  name: ${NAME}-config
+  namespace: ${NAMESPACE}
+
+---
+apiVersion: v1
+data:
+  policy.cfg: |
+    {
+      "kind": "Policy",
+      "apiVersion": "v1",
+      "predicates": [
+        {"name": "PodFitsHostPorts"},
+        {"name": "PodFitsResources"},
+        {"name": "NoDiskConflict"},
+        {"name": "MatchNodeSelector"},
+        {"name": "HostName"}
+      ],
+      "priorities": [
+        {"name": "LeastRequestedPriority", "weight": 1},
+        {"name": "BalancedResourceAllocation",  "weight": 1},
+        {"name": "ServiceSpreadingPriority",  "weight": 1},
+        {"name": "EqualPriority","weight": 1}
+      ],
+      "extenders": [
+        {
+          "urlPrefix": "http://172.11.52.137:8880/v1",
+          "filterVerb": "predicates",
+          "prioritizeVerb": "",
+          "preemptVerb": "",
+          "bindVerb": "",
+          "weight": 1,
+          "enableHttps": false,
+          "nodeCacheCapable": false
+        }
+      ],
+      "hardPodAffinitySymmetricWeight": 10
+    }
+kind: ConfigMap
+metadata:
+  name: ${NAME}-policy
+  namespace: ${NAMESPACE}
+
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app: ${NAME}
+  name: ${NAME}
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${NAME}
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: ${NAME}
+    spec:
+      nodeName: k8s-master01.idc
+      serviceAccountName: ${NAME}-sa
+      containers:
+      - args:
+        - kube-scheduler
+        - -v=4
+        - --config=/${NAME}/config.yaml
+        - --kubeconfig=/etc/kubernetes/scheduler.conf
+        image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.13.1
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 8
+          httpGet:
+            host: 127.0.0.1
+            path: /healthz
+            port: 10251
+            scheme: HTTP
+          initialDelaySeconds: 15
+          timeoutSeconds: 15
+        name: ${NAME}-base
+        volumeMounts:
+        - mountPath: /${NAME}
+          name: ${NAME}-config
+          readOnly: true
+      volumes:
+      - configMap:
+          defaultMode: 420
+          name: ${NAME}-config
+        name: ${NAME}-config
+      - hostPath:
+          path: /etc/kubernetes/scheduler.conf
+          type: FileOrCreate
+        name: kubeconfig
