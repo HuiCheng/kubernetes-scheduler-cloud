@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"math"
 	"sort"
 
 	macaron "gopkg.in/macaron.v1"
@@ -14,6 +14,8 @@ import (
 
 var (
 	version string
+	toGB    float64 = 1024.0 * 1024.0 * 1024.0 * 1024.0
+	toCore  float64 = 1000.0
 )
 
 type scheduler struct {
@@ -40,43 +42,40 @@ func (s *scheduler) getMostSuitableNode(nodes *coreV1.NodeList, cpuNum, memoryNu
 		return nodeMemorySortList[i].Status.Allocatable.Memory().MilliValue() < nodeMemorySortList[j].Status.Allocatable.Memory().MilliValue()
 	})
 
-	nodeCPUSortChan := make(chan coreV1.Node, len(nodeCPUSortList))
-	for _, n := range nodeCPUSortList {
-		nodeCPUSortChan <- n
-	}
-	close(nodeCPUSortChan)
-
-	nodeMemorySortChan := make(chan coreV1.Node, len(nodeMemorySortList))
-	for _, n := range nodeMemorySortList {
-		nodeMemorySortChan <- n
-	}
-	close(nodeMemorySortChan)
-
 	var nodeCPUOK coreV1.Node
 	var nodeMemoryOK coreV1.Node
 
-	for i := 1; i < len(nodes.Items)*2; i++ {
-		select {
-		case cpuNode := <-nodeCPUSortChan:
-			log.Println("CPU", cpuNode.Name)
-			if nodeCPUOK.Name == "" && cpuNode.Status.Allocatable.Cpu().MilliValue() > cpuNum {
-				nodeCPUOK = cpuNode
-			}
-		case nodeMemory := <-nodeMemorySortChan:
-			log.Println("MEMORY", nodeMemory.Name)
-			if nodeMemoryOK.Name == "" && nodeMemory.Status.Allocatable.Memory().MilliValue() > cpuNum {
-				nodeMemoryOK = nodeMemory
-			}
-		}
-
-		if nodeCPUOK.Name != "" &&
-			nodeMemoryOK.Name != "" &&
-			nodeCPUOK.Name == nodeMemoryOK.Name {
-			log.Println("END", nodeCPUOK.Name, nodeMemoryOK.Name)
-			return nodeCPUOK
+	for _, node := range nodeCPUSortList {
+		if node.Status.Allocatable.Cpu().MilliValue() >= cpuNum && node.Status.Allocatable.Memory().MilliValue() >= memoryNum {
+			nodeCPUOK = node
+			break
 		}
 	}
-	return coreV1.Node{}
+	for _, node := range nodeMemorySortList {
+		if node.Status.Allocatable.Cpu().MilliValue() >= cpuNum && node.Status.Allocatable.Memory().MilliValue() >= memoryNum {
+			nodeMemoryOK = node
+			break
+		}
+	}
+
+	if nodeCPUOK.Name == "" && nodeMemoryOK.Name == "" {
+		return coreV1.Node{}
+	}
+
+	if nodeCPUOK.Name == nodeMemoryOK.Name {
+		return nodeCPUOK
+	}
+
+	requestRatio := (float64(memoryNum) / toGB) / (float64(cpuNum) / toCore)
+	nodeCPURatio := (float64(nodeCPUOK.Status.Allocatable.Memory().MilliValue()) / toGB) /
+		(float64(nodeCPUOK.Status.Allocatable.Cpu().MilliValue()) / toCore)
+	nodeMemoryRatio := (float64(nodeMemoryOK.Status.Allocatable.Memory().MilliValue()) / toGB) /
+		(float64(nodeMemoryOK.Status.Allocatable.Cpu().MilliValue()) / toCore)
+
+	if math.Abs(nodeCPURatio-requestRatio) < math.Abs(nodeMemoryRatio-requestRatio) {
+		return nodeCPUOK
+	}
+	return nodeMemoryOK
 }
 
 func (s *scheduler) predicatesHandler(ctx *macaron.Context) string {
